@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Exam Renderer</title>
+    <!-- Thư viện KaTeX CSS cho công thức Toán -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-n8MVd4RsRQ05Q//59aGxeSny18/m402bJ//n2E3N2I0jKhd4v6e8xH0E880sX2w4" crossorigin="anonymous">
+  </head>
+  <body>
+    <div id="error-log" style="color: red; padding: 20px; font-family: monospace;"></div>
+    <script>
+      window.addEventListener('error', function(e) {
+        document.getElementById('error-log').innerHTML += '<p>' + e.message + '<br/>' + e.filename + ':' + e.lineno + '</p>';
+      });
+    </script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
