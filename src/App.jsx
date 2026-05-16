@@ -1,7 +1,10 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import { motion } from 'framer-motion';
+import { Radar, RadarChart, PolarGrid, PolarAngleAxis, ResponsiveContainer } from 'recharts';
+import { Moon, Sun, UploadCloud, FileJson, Pencil, Edit3, RotateCcw } from 'lucide-react';
 
 function App() {
   const [jsonInput, setJsonInput] = useState('');
@@ -22,6 +25,114 @@ function App() {
   const examPaperRef = useRef(null);
   const fileInputRef = useRef(null);
   const promptBodyRef = useRef(null);
+  const [isDarkModePaper, setIsDarkModePaper] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [undoStack, setUndoStack] = useState([]);
+  const [toastMsg, setToastMsg] = useState('');
+
+  const showToast = (msg) => {
+    setToastMsg(msg);
+    setTimeout(() => setToastMsg(''), 3000);
+  };
+
+  const pushUndo = (prevData) => {
+    setUndoStack(s => {
+      const next = [...s, JSON.parse(JSON.stringify(prevData))];
+      return next.length > 50 ? next.slice(next.length - 50) : next;
+    });
+  };
+
+  const handleUndo = () => {
+    if (undoStack.length === 0) return;
+    const prev = undoStack[undoStack.length - 1];
+    setUndoStack(s => s.slice(0, -1));
+    setExamData(prev);
+    showToast('Đã hoàn tác (Undo)');
+  };
+
+
+  // ── Immutable update helpers for inline editing ──
+  const updatePartField = useCallback((partIndex, field, newValue) => {
+    setExamData(prev => {
+      pushUndo(prev);
+      const next = prev.map((p, i) => i === partIndex ? { ...p, [field]: newValue } : p);
+      return next;
+    });
+  }, []);
+
+  const updateQuestionField = useCallback((partIndex, questionIndex, field, newValue) => {
+    setExamData(prev => {
+      pushUndo(prev);
+      return prev.map((p, i) => {
+        if (i !== partIndex) return p;
+        const newQuestions = p.questions.map((q, qi) =>
+          qi === questionIndex ? { ...q, [field]: newValue } : q
+        );
+        return { ...p, questions: newQuestions };
+      });
+    });
+  }, []);
+
+  const updateOptionText = useCallback((partIndex, questionIndex, optionKey, newValue) => {
+    setExamData(prev => {
+      pushUndo(prev);
+      return prev.map((p, i) => {
+        if (i !== partIndex) return p;
+        const newQuestions = p.questions.map((q, qi) => {
+          if (qi !== questionIndex) return q;
+          return { ...q, options: { ...q.options, [optionKey]: newValue } };
+        });
+        return { ...p, questions: newQuestions };
+      });
+    });
+  }, []);
+
+  const toggleCorrectAnswer = useCallback((partIndex, questionIndex, optionKey) => {
+    setExamData(prev => {
+      pushUndo(prev);
+      return prev.map((p, i) => {
+        if (i !== partIndex) return p;
+        const newQuestions = p.questions.map((q, qi) =>
+          qi === questionIndex ? { ...q, correctAnswer: optionKey } : q
+        );
+        return { ...p, questions: newQuestions };
+      });
+    });
+    showToast(`Đã đổi đáp án đúng thành ${optionKey}`);
+  }, []);
+
+  const syncJsonFromExam = useCallback(() => {
+    if (examData) {
+      setJsonInput(JSON.stringify(examData, null, 2));
+    }
+  }, [examData]);
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const parsed = JSON.parse(event.target.result);
+        setJsonInput(JSON.stringify(parsed, null, 2));
+      } catch (e) {
+        setJsonInput(event.target.result);
+      }
+      setActiveTab('input');
+    };
+    reader.readAsText(file);
+  };
 
   useEffect(() => {
     setJsonLineCount(jsonInput.split('\n').length);
@@ -232,21 +343,39 @@ function App() {
     stats.topicDist[q.topic] = (stats.topicDist[q.topic] || 0) + 1;
   });
 
+  const radarData = Object.entries(stats.topicDist).map(([subject, count]) => ({
+    subject, A: count, fullMark: Math.max(...Object.values(stats.topicDist)) + 2,
+  }));
+
   // Group parts into "single" (1 question) and "cluster" (multiple questions)
+  // IMPORTANT: _origIdx preserves the original index in examData[] for inline editing
   const singleParts = [];
   const clusterParts = [];
   if (examData) {
-    examData.forEach(part => {
+    examData.forEach((part, idx) => {
       if ((part.questions || []).length > 1) {
-        clusterParts.push(part);
+        clusterParts.push({ ...part, _origIdx: idx });
       } else {
-        singleParts.push(part);
+        singleParts.push({ ...part, _origIdx: idx });
       }
     });
   }
 
   // Build a running question counter
   let questionCounter = 0;
+
+  const containerVariants = {
+    hidden: { opacity: 0 },
+    show: {
+      opacity: 1,
+      transition: { staggerChildren: 0.1 }
+    }
+  };
+
+  const itemVariants = {
+    hidden: { opacity: 0, y: 20 },
+    show: { opacity: 1, y: 0, transition: { type: "spring", stiffness: 300, damping: 24 } }
+  };
 
   return (
     <div className="app-container">
@@ -255,11 +384,16 @@ function App() {
         {/* Sidebar Header */}
         <div className="sidebar-header">
           <div className="sidebar-logo">
-            <span className="logo-icon">📝</span>
+            <div className="logo-icon-wrap">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="url(#logoGrad)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <defs><linearGradient id="logoGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stopColor="#6366f1"/><stop offset="100%" stopColor="#a855f7"/></linearGradient></defs>
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+              </svg>
+            </div>
             {!controlsCollapsed && (
               <div className="logo-text">
-                <h1>ĐGNL Renderer</h1>
-                <p className="logo-subtitle">V-ACT Exam Generator</p>
+                <h1>V-ACT Studio</h1>
+                <p className="logo-subtitle">Exam Generator · v5.0</p>
               </div>
             )}
           </div>
@@ -280,30 +414,62 @@ function App() {
                 className={`tab-btn ${activeTab === 'input' ? 'tab-active' : ''}`}
                 onClick={() => { setActiveTab('input'); setShowPromptView(false); }}
               >
-                📋 JSON
+                <span className="tab-icon">{ }</span> JSON
               </button>
               <button
                 className={`tab-btn ${activeTab === 'stats' ? 'tab-active' : ''}`}
                 onClick={() => { setActiveTab('stats'); setShowPromptView(false); }}
                 disabled={!examData}
               >
-                📊 Stats
+                <span className="tab-icon">📊</span> Stats
               </button>
               <button
                 className={`tab-btn ${activeTab === 'prompt' ? 'tab-active' : ''}`}
                 onClick={() => { setActiveTab('prompt'); loadPrompt(); }}
               >
-                📜 Prompt
+                <span className="tab-icon">⚙️</span> Prompt
               </button>
             </div>
 
             {/* Tab: Input */}
             {activeTab === 'input' && (
               <div className="tab-content">
+                {/* Drop Zone */}
+                <div 
+                  className={`sidebar-dropzone ${isDragging ? 'dropzone-active' : ''} ${jsonInput.trim() ? 'dropzone-has-data' : ''}`}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  {!jsonInput.trim() && !isDragging && (
+                    <div className="dropzone-content">
+                      <FileJson size={32} strokeWidth={1.5} />
+                      <span className="dropzone-label">Kéo thả file .json vào đây</span>
+                      <span className="dropzone-sublabel">hoặc dán trực tiếp bên dưới</span>
+                    </div>
+                  )}
+                  {isDragging && (
+                    <div className="dropzone-content dropzone-highlight">
+                      <UploadCloud size={36} strokeWidth={1.5} />
+                      <span className="dropzone-label">Thả file để tải lên</span>
+                    </div>
+                  )}
+                  {jsonInput.trim() && !isDragging && (
+                    <div className="dropzone-content dropzone-loaded">
+                      <FileJson size={18} strokeWidth={2} />
+                      <span className="dropzone-label">{jsonLineCount} dòng đã tải</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Quick Actions Row */}
                 <div className="input-header">
-                  <span className="input-badge">{jsonLineCount} dòng</span>
-                  <button className="btn-mini" onClick={loadSample} title="Tải JSON mẫu">📥 Mẫu</button>
-                  <button className="btn-mini" onClick={() => fileInputRef.current?.click()} title="Nhập từ file">📂 File</button>
+                  <button className="btn-chip" onClick={loadSample} title="Tải JSON mẫu">
+                    <span>📥</span> Mẫu
+                  </button>
+                  <button className="btn-chip" onClick={() => fileInputRef.current?.click()} title="Nhập từ file">
+                    <span>📂</span> File
+                  </button>
                   <input
                     ref={fileInputRef}
                     type="file"
@@ -311,29 +477,36 @@ function App() {
                     style={{ display: 'none' }}
                     onChange={handleFileImport}
                   />
+                  <div className="input-header-spacer" />
+                  <span className="input-badge">{jsonLineCount} dòng</span>
                 </div>
-                <textarea
-                  className="json-input"
-                  value={jsonInput}
-                  onChange={(e) => setJsonInput(e.target.value)}
-                  placeholder='Dán JSON vào đây...'
-                  rows={14}
-                  spellCheck={false}
-                />
+
+                {/* JSON Editor */}
+                <div className="json-editor-wrap">
+                  <textarea
+                    className="json-input"
+                    value={jsonInput}
+                    onChange={(e) => setJsonInput(e.target.value)}
+                    placeholder='{ "subject": "Tiếng Việt", ... }'
+                    spellCheck={false}
+                  />
+                </div>
                 {error && <div className="error-message">⚠️ {error}</div>}
 
+                {/* Actions */}
                 <div className="action-buttons">
                   <button className="btn-primary" onClick={handleRender} disabled={!jsonInput.trim()}>
-                    ⚡ Render
+                    ⚡ Render đề thi
                   </button>
                   <button className="btn-outline" onClick={handlePrint} disabled={!examData}>
-                    🖨️ In PDF
+                    🖨️ PDF
                   </button>
                   <button className="btn-ghost" onClick={handleClearAll} disabled={!jsonInput && !examData}>
-                    🗑️ Xóa
+                    🗑️
                   </button>
                 </div>
 
+                {/* Toggle */}
                 <div className="option-toggles">
                   <label className="toggle-label">
                     <input
@@ -415,12 +588,15 @@ function App() {
                 {/* Topic Distribution */}
                 <div className="stats-section">
                   <h3 className="stats-heading">Phân bố chủ đề</h3>
-                  {Object.entries(stats.topicDist).map(([topic, count]) => (
-                    <div key={topic} className="topic-row">
-                      <span className="topic-name">{topic}</span>
-                      <span className="topic-count">{count}</span>
-                    </div>
-                  ))}
+                  <div className="radar-chart-container" style={{ width: '100%', height: 250, marginTop: 10 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
+                        <PolarGrid stroke="rgba(255,255,255,0.1)" />
+                        <PolarAngleAxis dataKey="subject" tick={{ fill: 'var(--text-secondary)', fontSize: 10 }} />
+                        <Radar name="Số lượng" dataKey="A" stroke="var(--accent)" fill="var(--accent)" fillOpacity={0.4} />
+                      </RadarChart>
+                    </ResponsiveContainer>
+                  </div>
                 </div>
 
                 <button className="btn-outline btn-full" onClick={handleCopyAnswers}>
@@ -522,10 +698,17 @@ function App() {
 
         {/* Empty State */}
         {!examData && !showPromptView && (
-          <div className="empty-state no-print">
-            <div className="empty-icon">📄</div>
-            <h2>Chưa có đề thi</h2>
-            <p>Dán JSON vào ô bên trái và nhấn <strong>⚡ Render</strong> để xem trước đề thi.</p>
+          <div 
+            className={`empty-state no-print ${isDragging ? 'dragging' : ''}`}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <div className="empty-icon">
+              {isDragging ? <UploadCloud size={64} color="var(--accent-light)" /> : <FileJson size={64} color="var(--text-muted)" opacity={0.5} />}
+            </div>
+            <h2>{isDragging ? 'Thả file JSON vào đây' : 'Chưa có đề thi'}</h2>
+            <p>{isDragging ? 'Dữ liệu sẽ tự động được hiển thị.' : 'Dán JSON vào ô bên trái hoặc kéo thả file .json vào đây để xem trước đề thi.'}</p>
             <button className="btn-outline" onClick={() => { setActiveTab('prompt'); loadPrompt(); }} style={{marginTop: 16}}>
               📜 Xem Prompt v5.0
             </button>
@@ -534,7 +717,35 @@ function App() {
 
         {/* EXAM PAPER */}
         {examData && (
-          <div className="exam-paper" ref={examPaperRef}>
+          <div className="exam-paper-container">
+
+            <div className="exam-paper-actions no-print">
+              <button 
+                className={`btn-theme-toggle ${editMode ? 'active' : ''}`}
+                onClick={() => {
+                  if (editMode) {
+                    syncJsonFromExam();
+                    showToast('Đã lưu vào JSON');
+                  }
+                  setEditMode(!editMode);
+                }}
+                title={editMode ? 'Tắt chế độ chỉnh sửa' : 'Bật chế độ chỉnh sửa'}
+              >
+                {editMode ? <Edit3 size={16} /> : <Pencil size={16} />}
+                <span>{editMode ? 'Thoát sửa' : 'Sửa đề'}</span>
+              </button>
+              <div style={{flex:1}} />
+              <button 
+                className={`btn-theme-toggle ${isDarkModePaper ? 'dark' : ''}`}
+                onClick={() => setIsDarkModePaper(!isDarkModePaper)}
+                title="Chuyển đổi giao diện sáng/tối"
+              >
+                {isDarkModePaper ? <Sun size={16} /> : <Moon size={16} />}
+                <span>{isDarkModePaper ? 'Chế độ In' : 'Bảo vệ mắt'}</span>
+              </button>
+            </div>
+            
+            <div className={`exam-paper ${isDarkModePaper ? 'dark-mode' : ''} ${editMode ? 'edit-mode' : ''}`} ref={examPaperRef}>
             {/* === HEADER === */}
             <div className="exam-header">
               <div className="exam-header-left">
@@ -557,47 +768,92 @@ function App() {
 
             {/* === PHẦN 1: CÂU HỎI ĐƠN === */}
             {singleParts.length > 0 && (
-              <div className="exam-section">
+              <motion.div className="exam-section" variants={containerVariants} initial="hidden" animate="show">
                 {singleParts.map((part, index) => {
                   questionCounter++;
                   const q = part.questions[0];
                   const currentNum = questionCounter;
+                  const pi = part._origIdx;
 
                   return (
-                    <div key={index} className="question-block">
+                    <motion.div key={index} className="question-block" variants={itemVariants}>
                       {/* Context */}
                       {part.context && part.context.trim() !== '' && (
                         <div className="exam-context">
                           <div className="context-content">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkMath]}
-                              rehypePlugins={[rehypeKatex]}
+                            <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updatePartField(pi, 'context', val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
                             >
-                              {part.context}
-                            </ReactMarkdown>
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                
+                              >
+                                {part.context}
+                              </ReactMarkdown>
+                            </div>
                           </div>
                           {part.source && part.source.trim() !== '' && (
-                            <div className="context-source">{part.source}</div>
+                            <div className="context-source">
+                              <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updatePartField(pi, 'source', val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
+                            >
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                components={{ p: 'span' }}
+                              >
+                                {part.source}
+                              </ReactMarkdown>
+                            </div>
+                            </div>
                           )}
                         </div>
                       )}
 
                       <div className="question-content">
                         <strong>Câu {currentNum}:</strong>{' '}
-                        <ReactMarkdown
-                          remarkPlugins={[remarkMath]}
-                          rehypePlugins={[rehypeKatex]}
-                          components={{ p: 'span' }}
-                        >
-                          {q.content}
-                        </ReactMarkdown>
+                        <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updateQuestionField(pi, 0, 'content', val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
+                            >
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                components={{ p: 'span' }}
+                              >
+                                {q.content}
+                              </ReactMarkdown>
+                            </div>
                       </div>
 
                       <div className={`options-grid ${isLongOptions(q.options) ? 'options-single-col' : ''}`}>
                         {Object.entries(q.options || {}).map(([key, value]) => (
-                          <div key={key} className={`option-item ${showAnswers && q.correctAnswer === key ? 'option-correct' : ''}`}>
-                            <span className="option-label">{key}.</span>
+                          <div
+                            key={key}
+                            className={`option-item ${showAnswers && q.correctAnswer === key ? 'option-correct' : ''} ${editMode ? 'option-editable-v2' : ''}`}
+                            onClick={editMode ? (e) => { if (e.ctrlKey || e.metaKey) { e.stopPropagation(); toggleCorrectAnswer(pi, 0, key); } } : undefined}
+                          >
+                            <span className={`option-label ${editMode && q.correctAnswer === key ? 'option-label-correct' : ''}`}>{key}.</span>
                             <span className="option-text">
+                              <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updateOptionText(pi, 0, key, val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
+                            >
                               <ReactMarkdown
                                 remarkPlugins={[remarkMath]}
                                 rehypePlugins={[rehypeKatex]}
@@ -605,25 +861,27 @@ function App() {
                               >
                                 {value}
                               </ReactMarkdown>
+                            </div>
                             </span>
                           </div>
                         ))}
                       </div>
-                    </div>
+                    </motion.div>
                   );
                 })}
-              </div>
+              </motion.div>
             )}
 
             {/* === PHẦN 2: CÂU HỎI CHÙM === */}
             {clusterParts.length > 0 && (
-              <div className="exam-section">
+              <motion.div className="exam-section" variants={containerVariants} initial="hidden" animate="show">
                 {clusterParts.map((part, pIndex) => {
                   const startNum = questionCounter + 1;
                   const endNum = questionCounter + part.questions.length;
+                  const pi = part._origIdx;
 
                   return (
-                    <div key={pIndex} className="cluster-block">
+                    <motion.div key={pIndex} className="cluster-block" variants={itemVariants}>
                       <div className="cluster-intro">
                         Dựa vào các thông tin được cung cấp dưới đây để trả lời các câu <strong>{startNum}</strong> đến <strong>{endNum}</strong>:
                       </div>
@@ -631,15 +889,40 @@ function App() {
                       {part.context && part.context.trim() !== '' && (
                         <div className="exam-context cluster-context">
                           <div className="context-content">
-                            <ReactMarkdown
-                              remarkPlugins={[remarkMath]}
-                              rehypePlugins={[rehypeKatex]}
+                            <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updatePartField(pi, 'context', val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
                             >
-                              {part.context}
-                            </ReactMarkdown>
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                
+                              >
+                                {part.context}
+                              </ReactMarkdown>
+                            </div>
                           </div>
                           {part.source && part.source.trim() !== '' && (
-                            <div className="context-source">{part.source}</div>
+                            <div className="context-source">
+                              <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updatePartField(pi, 'source', val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
+                            >
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                components={{ p: 'span' }}
+                              >
+                                {part.source}
+                              </ReactMarkdown>
+                            </div>
+                            </div>
                           )}
                         </div>
                       )}
@@ -653,27 +936,47 @@ function App() {
                             <div key={q.id || qIndex} className="question-block">
                               <div className="question-content">
                                 <strong>Câu {currentNum}:</strong>{' '}
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkMath]}
-                                  rehypePlugins={[rehypeKatex]}
-                                  components={{ p: 'span' }}
-                                >
-                                  {q.content}
-                                </ReactMarkdown>
+                                <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updateQuestionField(pi, qIndex, 'content', val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
+                            >
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                components={{ p: 'span' }}
+                              >
+                                {q.content}
+                              </ReactMarkdown>
+                            </div>
                               </div>
 
                               <div className={`options-grid ${isLongOptions(q.options) ? 'options-single-col' : ''}`}>
                                 {Object.entries(q.options || {}).map(([key, value]) => (
-                                  <div key={key} className={`option-item ${showAnswers && q.correctAnswer === key ? 'option-correct' : ''}`}>
-                                    <span className="option-label">{key}.</span>
+                                  <div
+                                    key={key}
+                                    className={`option-item ${showAnswers && q.correctAnswer === key ? 'option-correct' : ''} ${editMode ? 'option-editable-v2' : ''}`}
+                                    onClick={editMode ? (e) => { if (e.ctrlKey || e.metaKey) { e.stopPropagation(); toggleCorrectAnswer(pi, qIndex, key); } } : undefined}
+                                  >
+                                    <span className={`option-label ${editMode && q.correctAnswer === key ? 'option-label-correct' : ''}`}>{key}.</span>
                                     <span className="option-text">
-                                      <ReactMarkdown
-                                        remarkPlugins={[remarkMath]}
-                                        rehypePlugins={[rehypeKatex]}
-                                        components={{ p: 'span' }}
-                                      >
-                                        {value}
-                                      </ReactMarkdown>
+                                      <div 
+                              contentEditable={editMode} 
+                              suppressContentEditableWarning={true} 
+                              onBlur={(e) => (val_text) => updateOptionText(pi, qIndex, key, val_text)(e.target.innerText)}
+                              className={`editable-content-v2 ${editMode ? 'is-editable' : ''}`}
+                              onClick={editMode ? (e) => e.stopPropagation() : undefined}
+                            >
+                              <ReactMarkdown
+                                remarkPlugins={[remarkMath]}
+                                rehypePlugins={[rehypeKatex]}
+                                components={{ p: 'span' }}
+                              >
+                                {value}
+                              </ReactMarkdown>
+                            </div>
                                     </span>
                                   </div>
                                 ))}
@@ -682,10 +985,10 @@ function App() {
                           );
                         })}
                       </div>
-                    </div>
+                    </motion.div>
                   );
                 })}
-              </div>
+              </motion.div>
             )}
 
             {/* === FOOTER === */}
@@ -718,9 +1021,30 @@ function App() {
               </div>
             )}
           </div>
+          </div>
         )}
       </main>
-    </div>
+    
+      {/* Floating Action Bar & Toast */}
+      {editMode && (
+        <div className="edit-fab no-print">
+          <button className="btn-fab btn-fab-undo" onClick={handleUndo} disabled={undoStack.length === 0} title="Hoàn tác (Undo)">
+            <RotateCcw size={18} />
+            <span>Undo {undoStack.length > 0 ? `(${undoStack.length})` : ''}</span>
+          </button>
+          <button className="btn-fab btn-fab-save" onClick={() => { syncJsonFromExam(); showToast('Đã lưu vào JSON'); }} title="Đồng bộ JSON">
+            <FileJson size={18} />
+            <span>Lưu JSON</span>
+          </button>
+        </div>
+      )}
+      
+      {toastMsg && (
+        <div className="edit-toast no-print">
+          {toastMsg}
+        </div>
+      )}
+</div>
   );
 }
 
